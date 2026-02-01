@@ -9,17 +9,38 @@ const app = express(); // web server
 app.use(cors()); // allow cross-origin requests
 app.use(express.json()); // if request has JSON body, parse it and put it in req.body
 
-const dreamsByDate = {}; // 'database' key value pairs date: user input
+
+async function initDb(){ 
+  db = await open({ // open connection to database - wait for it to be ready
+    filename: './dreams.sqlite', // database file
+    driver: sqlite3.Database, // database driver
+  });
+
+  // runs raw SQL , create table if doesnt exist, columns: date as pk, text user input or empty string, store timestamp
+await db.exec(` 
+  CREATE TABLE IF NOT EXISTS dreams (
+    date TEXT PRIMARY KEY,
+    text TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+`);
+}
 
 // GET a dream for a date
-app.get("/api/dreams/:date", (req, res) => { // GET request to /api/dreams/date
+app.get("/api/dreams/:date", async (req, res) => { // GET request to /api/dreams/date
   const date = req.params.date; // gets date from URL
-  const text = dreamsByDate[date] || ""; // looks up dream for that date, or empty string
-  res.json({ date, text }); // return JSON reponse 
+
+  const row = await db.get( // query database - find row where date matches value from URL
+    "SELECT text FROM dreams WHERE date = ?", // parameterised query to prevent SQL injection - ? placeholder, sql + user date sent seperately
+    date
+  );
+
+  const text = row ? row.text : ""; // if row exists, get text, else empty string
+  res.json({ date, text }); // return JSON response
 });
 
 // PUT to save/replace a dream for a date
-app.put("/api/dreams/:date", (req, res) => { // PUT request to /api/dreams/date
+app.put("/api/dreams/:date", async(req, res) => { // PUT request to /api/dreams/date
   const date = req.params.date; // gets date from URL
   const { text } = req.body; // gets text from request body
 
@@ -27,11 +48,33 @@ app.put("/api/dreams/:date", (req, res) => { // PUT request to /api/dreams/date
     return res.status(400).json({ error: "text must be a string" }); // bad request 
   }
 
-  dreamsByDate[date] = text; // saves dream
+  const now = new Date().toISOString(); // current timestamp
+
+  await db.run( // insert or replace row in database, placeholders -> sql parsed before values inserted
+    `INSERT INTO dreams (date, text, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(date) DO UPDATE SET
+        text = excluded.text,
+        updated_at = excluded.updated_at
+    `,
+    date,
+    text,
+    now
+  ); // on conflict -> if this date already exists, dont error - just update row , avoids race conditions
+
   res.json({ date, text }); // return JSON response
+
 });
 
 const PORT = 3001; // listen for requests
-app.listen(PORT, () => { 
-  console.log(`API running on http://localhost:${PORT}`);
-});
+
+initDb()
+  .then(() => {
+    app.listen(PORT, () => { // listens for requests only after db open
+      console.log(`API running on http://localhost:${PORT}`); 
+    });
+  })
+  .catch((err) => { // error handling - if db fails to open
+    console.error("failed to start server:", err);
+    process.exit(1);
+  });
